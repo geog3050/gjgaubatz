@@ -3,64 +3,7 @@ import numpy as np
 import pandas as pd
 import math
 
-def AFSCBaseReorg(destinationFolder, CSVPath):
-    # Load the data from the CSV file
-    data = pd.read_csv(CSVPath)
-
-    dfMelted = data.melt(var_name='AFSC', value_name='Base')
-    # Remove any leading or trailing spaces in 'Base' names
-    dfMelted['Base'] = df_melted['Base'].str.strip()
-
-    # Drop rows with None values
-    dfMelted = df_melted.dropna()
-
-    # Group by base make list of the AFSCs for each base
-    baseAfscs = dfMelted.groupby('Base')['AFSC'].apply(list).reset_index()
-
-    # Rename columns for clarity
-    baseAfscs.columns = ['Base', 'AFSC']
-
-    # Set CSV Name
-    resultCSVName = "AFSCAtEachBase"
-
-    # Save the resulting table to a CSV file
-    AFSCBaseReorgCSV = f"{destinationFolder}/{resultCSVName}.csv"
-    baseAfscs.to_csv(AFSCBaseReorgCSV, index=False)
-    return AFSCBaseReorgCSV
-
-def coordinateCleanUp(destinationFolder, AFSCBaseReorgCSV):
-
-    # Load the CSV file
-    data = pd.read_csv(AFSCBaseReorgCSV)
-
-    # Split the 'Coordinates' column into 'Longitude' and 'Latitude'
-    data[['Longitude', 'Latitude']] = data['Coordinates'].str.split(';', expand=True)
-
-    # Convert the new columns to numeric types, ensuring they are signed numbers
-    data['Longitude'] = pd.to_numeric(data['Longitude'], errors='coerce')
-    data['Latitude'] = pd.to_numeric(data['Latitude'], errors='coerce')
-    
-    resultCSVName = "AFSCBaseCoordinateClean"
-
-    # Save the corrected dataframe back to a CSV file
-    AFSCBaseCoordinateClean = f"{destinationFolder}/{resultCSVName}.csv"
-
-    data.to_csv(AFSCBaseCoordinateClean, index=False)
-    return AFSCBaseCoordinateClean
-
-def csvMerge():
-    # Merge the dataframes on Base ID while preserving all rows from AFSCs at Each Base dataframe
-    merged_df = afscs_at_base.merge(corrected_info[['BASE-ID', 'Longitude', 'Latitude']],
-                                    left_on='Base ID',
-                                    right_on='BASE-ID',
-                                    how='left')
-
-    # Drop the 'BASE-ID' column as it's redundant after the merge
-    merged_df.drop(columns=['BASE-ID'], inplace=True)
-
-    # Show the first few rows of the merged dataframe
-    merged_df.head()
-
+##Create Geodatabase for project
 def createGeodatabase(outputDirectory, geodatabaseName):
     
     # Construct the full path for the new geodatabase
@@ -74,10 +17,18 @@ def createGeodatabase(outputDirectory, geodatabaseName):
         arcpy.CreateFileGDB_management(outputDirectory, geodatabaseName)
         print(f"Geodatabase created at: {gdbPath}")
 
-    return gdbPath    
-    
+    return gdbPath
+
 def importCSVIntoGeodatabase(csvFile, geodatabase):
-    importedCSVPath = arcpy.TableToTable_conversion(csvFile, geodatabase, "BaseInfo")
+    ##moves on if table is already created
+    if arcpy.Exists("BaseInfo"):
+        print(f"File already imported: {csvFile}")
+        importedCSVPath = "BaseInfo"
+    else:
+        #import CSV
+        importedCSVPath = arcpy.TableToTable_conversion(csvFile, geodatabase, "BaseInfo")
+        print(f"CSV File: {importedCSVPath}, imported into Geodatabase")
+    
     return importedCSVPath
 
 def cleanCSVinGeodatabase(table_path):
@@ -123,7 +74,7 @@ def buildBaseDict(importedCSVPath, geodatabase):
                     baseDict[base]['AFSC'].append(afsc)
             
     return baseDict
-    
+
 ##Builds a dictionary mapping AFSC codes to a list of bases where the AFSC is present.
 def buildAFSCDict(baseData):
     ##imports previously created base Dict
@@ -147,43 +98,44 @@ def buildAFSCDict(baseData):
     ##    afsc_dict[afsc] = ', '.join(set(afsc_dict[afsc]))  # Use `set` to remove duplicate bases
     
     return afsc_dict
-    
-##Creates a table in the geodatabase with AFSC codes only.
-def AFSCTable(afscDict, geodatabase):
-    ##afscDict (dict): Dictionary with AFSC codes as keys.
-    ##geodatabase (str): Path to the geodatabase where the table will be created.
 
+##Updates a table by adding a field that stores the count of AFSCs for each base, using counts derived from a 'baseInfo' table.
+def addAFSCCount(baseInfoTable, geodatabase, identifierField, countField='AFSC_Count'):
+    
+    # Set the workspace to the specified geodatabase
     arcpy.env.workspace = geodatabase
-    tableName = "afscTable"
 
-    # Delete the table if it exists
-    if arcpy.Exists(tableName):
-        arcpy.Delete_management(tableName)
-        print(f"Existing table '{tableName}' was deleted.")
+    # Ensure that baseInfoTable exists 
+    if not arcpy.Exists(baseInfoTable):
+        raise FileNotFoundError(f"The specified table '{baseInfoTable}' does not exist in the geodatabase.")
 
-    # Create the table anew
-    arcpy.CreateTable_management(geodatabase, tableName)
-    arcpy.AddField_management(tableName, "AFSC", "TEXT", field_length=100)
-    
-    print(f"New table '{tableName}' created in the geodatabase.")
+    # add a field to base info table for the count
+    fieldNames = [field.name for field in arcpy.ListFields(baseInfoTable)]
+    if countField not in fieldNames:
+        arcpy.AddField_management(baseInfoTable, countField, "LONG")
+        print(f"Field '{countField}' base info table.")
+    else:
+        print(f"Field '{countField}' already exists in base Info Table.")
 
-    # Insert records
-    fields = ["AFSC"]
-    with arcpy.da.InsertCursor(tableName, fields) as cursor:
-        for afsc in afscDict.keys():
-            cursor.insertRow([afsc])
-            
+    # Create a dictionary from the baseInfoTable with base identifier as keys and AFSC count as values
+    inputDict = {}
+    with arcpy.da.SearchCursor(baseInfoTable, [identifierField, 'AFSC']) as cursor:
+        for row in cursor:
+            base_identifier = row[0]
+            afscs = row[1].split(',') if row[1] else []
+            inputDict[base_identifier] = len(set(afscs))  # Count unique AFSCs to avoid duplicates using set
+    # Update the count field in the shapefile based on the AFSC counts in the dictionary using update cursor
+    with arcpy.da.UpdateCursor(baseInfoTable, ['base', countField]) as cursor:
+        for row in cursor:
+            base_identifier = row[0]
+            if base_identifier in inputDict:
+                row[1] = inputDict[base_identifier]  # Set the AFSC count
+                cursor.updateRow(row)
 
-    print("AFSC table has been successfully created with updated data.")
-    return tableName
-    
+    print("Count field updated based on AFSC data from the baseInfo table.")
+
 ##Calculates the standard distance for each AFSC based on base locations extracted from a shapefile and updates an existing table in the geodatabase with these distances.
 def standardDistance(inputDict, geodatabase, tableName, baseTable):
-    
-    ##inputDict (dict): Dictionary containing AFSC codes and associated list of base names.
-    ##geodatabase (str): The path to the geodatabase where the table exists.
-    ##tableName (str): The name of the table to update.
-    ##shapefilePath (str): Path to the shapefile containing base coordinates.
 
     arcpy.env.workspace = geodatabase
 
@@ -198,6 +150,7 @@ def standardDistance(inputDict, geodatabase, tableName, baseTable):
         print(f"Table '{tableName}' does exists in the geodatabase. Adding StandardDistance.")
     # Load shapefile
     base_coordinates = {}
+    ##find coordinates for each base
     search = ["Base","Latitude","Longitude"]
     with arcpy.da.SearchCursor(baseTable, search) as cursor:
         for row in cursor:
@@ -238,56 +191,12 @@ def standardDistance(inputDict, geodatabase, tableName, baseTable):
     print("Updated the table with standard distances.")
     return tableName
 
-##Updates a shapefile by adding a field that stores the count of AFSCs for each base, using counts derived from a 'baseInfo' table.
-def addAFSCCount(baseInfoTable, geodatabase, identifierField, countField='AFSC_Count'):
-    
-    ##baseInfoTable (str): The name of the table within the geodatabase that contains base identifiers and their respective AFSCs.
-    ##geodatabase (str): Path to the geodatabase containing the shapefile and baseInfo table.
-    ##shapefile_path (str): The file path to the shapefile within the geodatabase.
-    ##identifierField (str): The field in the shapefile and the baseInfo table that matches base identifiers.
-    ##countField (str): The name of the new field to create in the shapefile for storing the AFSC count.
-    
-    # Set the workspace to the specified geodatabase
-    arcpy.env.workspace = geodatabase
-
-    # Ensure that baseInfoTable exists 
-    if not arcpy.Exists(baseInfoTable):
-        raise FileNotFoundError(f"The specified table '{baseInfoTable}' does not exist in the geodatabase.")
-
-    # add a field to base info table for the count
-    fieldNames = [field.name for field in arcpy.ListFields(baseInfoTable)]
-    if countField not in fieldNames:
-        arcpy.AddField_management(baseInfoTable, countField, "LONG")
-        print(f"Field '{countField}' base info table.")
-    else:
-        print(f"Field '{countField}' already exists in base Info Table.")
-
-    # Create a dictionary from the baseInfoTable with base identifier as keys and AFSC count as values
-    inputDict = {}
-    with arcpy.da.SearchCursor(baseInfoTable, [identifierField, 'AFSC']) as cursor:
-        for row in cursor:
-            base_identifier = row[0]
-            afscs = row[1].split(',') if row[1] else []
-            inputDict[base_identifier] = len(set(afscs))  # Count unique AFSCs to avoid duplicates using set
-    # Update the count field in the shapefile based on the AFSC counts in the dictionary using update cursor
-    with arcpy.da.UpdateCursor(baseInfoTable, ['base', countField]) as cursor:
-        for row in cursor:
-            base_identifier = row[0]
-            if base_identifier in inputDict:
-                row[1] = inputDict[base_identifier]  # Set the AFSC count
-                cursor.updateRow(row)
-
-    print("Count field updated based on AFSC data from the baseInfo table.")
-    
 ##Creates Point Shapefile from baseInfoTable
-def createPointShapeFile(baseTable, geodatabase, shapeFileName, mappingVar):
+def createPointShapeFile(tableName, shapeName, geodatabase, mappingVar):
     arcpy.env.workspace = geodatabase
-
     # Name of the input table
-    tableName = baseTable
-    
+    pointShapeFile = f"{shapeName}points"
     # Path to the output feature class
-    pointShapeFile = shapeFileName
     if arcpy.Exists(pointShapeFile):
         arcpy.Delete_management(pointShapeFile)
         print(f"Existing shapeFile '{pointShapeFile}' was deleted.")
@@ -298,21 +207,38 @@ def createPointShapeFile(baseTable, geodatabase, shapeFileName, mappingVar):
     arcpy.management.CreateFeatureclass(arcpy.env.workspace, pointShapeFile, "POINT", "", "", "", spatial_reference)
 
     # Add fields to store the latitude, longitude, and other details
-    arcpy.management.AddField(pointShapeFile, "Base", "TEXT")
-    arcpy.management.AddField(pointShapeFile, "Latitude", "DOUBLE")
-    arcpy.management.AddField(pointShapeFile, "Longitude", "DOUBLE")
+    
+    ##Creates shapefile for bases that includes the number of AFSCs at each base
     if mappingVar == "AFSCCount":
         arcpy.management.AddField(pointShapeFile, "AFSCCount", "DOUBLE")
         insertFields = ["Base", "Latitude", "Longitude", "AFSCCount", "SHAPE@XY"]
         searchFields = ["Base", "Latitude", "Longitude", "AFSCCount"]
-    else:
+        arcpy.management.AddField(pointShapeFile, "Base", "TEXT")
+        arcpy.management.AddField(pointShapeFile, "Latitude", "DOUBLE")
+        arcpy.management.AddField(pointShapeFile, "Longitude", "DOUBLE")
+        arcpy.management.AddField(pointShapeFile, "AFSCCount", "DOUBLE")
+    
+    ##Creates a shapefile for a user selected base that lists AFSCs at each base
+    elif mappingVar == "Base":
+        insertFields = ["Base", "Latitude", "Longitude", "AFSC", "SHAPE@XY"]
+        searchFields = ["Base", "Latitude", "Longitude", "AFSC"]
+        arcpy.management.AddField(pointShapeFile, "Base", "TEXT")
+        arcpy.management.AddField(pointShapeFile, "Latitude", "DOUBLE")
+        arcpy.management.AddField(pointShapeFile, "Longitude", "DOUBLE")
+        arcpy.management.AddField(pointShapeFile, "AFSC", "TEXT")
+    
+    ##Creates a shapefile for a user slected AFSC that includes points for every base for that AFSC
+    elif mappingVar == "AFSC":
         insertFields = ["Base", "Latitude", "Longitude", "SHAPE@XY"]
         searchFields = ["Base", "Latitude", "Longitude"]
-    # Use an InsertCursor to create new points and populate the feature class
-    
+        arcpy.management.AddField(pointShapeFile, "Base", "TEXT")
+        arcpy.management.AddField(pointShapeFile, "Latitude", "DOUBLE")
+        arcpy.management.AddField(pointShapeFile, "Longitude", "DOUBLE")
+    ## Use an InsertCursor to create new points and populate the feature class
+    ## Use a search cursor to parse through designated serach fields to populate shapefile fields
     with arcpy.da.SearchCursor(tableName, searchFields) as search_cursor, \
          arcpy.da.InsertCursor(pointShapeFile, insertFields) as insert_cursor:
-        if len(searchFields) > 3:
+        if searchFields == ["Base", "Latitude", "Longitude", "AFSCCount"]:
             for base_name, lat, lon, count in search_cursor:
                 # Ensure that the coordinates are valid
                 if -90 <= lat <= 90 and -180 <= lon <= 180:
@@ -321,147 +247,77 @@ def createPointShapeFile(baseTable, geodatabase, shapeFileName, mappingVar):
                     insert_cursor.insertRow(row)
                 else:
                     print(f"Skipped invalid coordinates for {base_name}: Latitude {lat}, Longitude {lon}")
-        else:
+        elif searchFields == ["Base", "Latitude", "Longitude", "AFSC"]:
+            for base_name, lat, lon, AFSC in search_cursor:
+                # Ensure that the coordinates are valid
+                if -90 <= lat <= 90 and -180 <= lon <= 180:
+                    point = (lon, lat)  # Create Point object as a tuple
+                    row = [base_name, lat, lon, AFSC, point]  # Prepare row data
+                    insert_cursor.insertRow(row)
+        elif searchFields == ["Base", "Latitude", "Longitude"]:
             for base_name, lat, lon in search_cursor:
                 # Ensure that the coordinates are valid
                 if -90 <= lat <= 90 and -180 <= lon <= 180:
                     point = (lon, lat)  # Create Point object as a tuple
-                    row = [base_name, lat, lon, count, point]  # Prepare row data
+                    row = [base_name, lat, lon, point]  # Prepare row data
                     insert_cursor.insertRow(row)
                 else:
-                    print(f"Skipped invalid coordinates for {base_name}: Latitude {lat}, Longitude {lon}")                   
+                    print(f"Skipped invalid coordinates for {base_name}: Latitude {lat}, Longitude {lon}")     
+        print(f"ShapeFile '{pointShapeFile}' was created.")
     return pointShapeFile
-    
-##creates proportonal symbol map based on the number of AFSCs at each base.
-def createPropSymbolMap(geodatabase, pointShapeFile, field_name, newMapName):
 
-    ##geodatabase (str): Path to the geodatabase containing the feature class.
-    ##feature_class (str): The name of the feature class to visualize.
-    ##field_name (str): The field that contains the number of AFSCs.
-    ##map_name (str): The name of the map within the project to use or verify existence.
-
-    # Set the workspace and overwrite output
-    arcpy.env.workspace = geodatabase
-    arcpy.env.overwriteOutput = True
-
-    # Path to the feature class
-    fc_path = f"{geodatabase}\\{pointShapeFile}"
-
-    # Ensure the feature class exists
-    if not arcpy.Exists(fc_path):
-        raise ValueError(f"The feature class {pointShapeFile} does not exist in the specified geodatabase.")
-
-    # Ensure the field exists in the feature class
-    fields = [field.name for field in arcpy.ListFields(fc_path)]
-    if field_name not in fields:
-        raise ValueError(f"The field {field_name} does not exist in the feature class.")
-
-    # Open the current ArcGIS Project
-    aprx = arcpy.mp.ArcGISProject("CURRENT")
-
-    # Retrieve or create the map
-    maps = aprx.listMaps(newMapName)
-    if not maps:
-        # Create a new map
-        mapx = arcpy.mp.Map()
-        aprx.addMap(mapx)
-        mapx.name = newMapName
-        print(f"Map named '{newMapName}' was created.")
-    else:
-        mapx = maps[0]
-
-    # Add the feature class to the map as a layer
-    layer = mapx.addDataFromPath(fc_path)
-
-    # Check if the layer supports proportional symbol rendering and configure it
-    if layer.symbologyType == "PROPORTIONAL_SYMBOLS":
-        layer.symbology.updateRenderer('ProportionalSymbolsRenderer')
-        layer.symbology.renderer.field = field_name
-        layer.symbology.renderer.minSymbolSize = 10
-        layer.symbology.renderer.maxSymbolSize = 50
-        # Calculate and set min and max data values for scaling symbols
-        min_value = min(row[0] for row in arcpy.da.SearchCursor(fc_path, field_name))
-        max_value = max(row[0] for row in arcpy.da.SearchCursor(fc_path, field_name))
-        layer.symbology.renderer.setMinMaxDataValues(min_value, max_value)
-    else:
-        raise RuntimeError("Layer does not support proportional symbols.")
-
-    # Save the project changes
-    aprx.save()
-
-    print(f"Proportional symbol map '{newMapName}' has been updated and is available in the project.")
-    
-def inputAFSCTable (baseDict, afscDict, selectedAFSC):
-    
-    tableName = selectedAFSC
-    if arcpy.Exists(tableName):
-        arcpy.Delete_management(tableName)
-        print(f"Existing table '{tableName}' was deleted.")
-    print(f"New table '{tableName}' created in the geodatabase.")
-    
-    arcpy.CreateTable_management(geodatabase, tableName)
-    arcpy.AddField_management(tableName, "Base", "TEXT")
-    arcpy.AddField_management(tableName, "Latitude", "DOUBLE")
-    arcpy.AddField_management(tableName, "Longitude", "DOUBLE")
-    # Start an insert cursor for adding data
-    with arcpy.da.InsertCursor(tableName, ["Base","Latitude", "Longitude", "AFSC"]) as cursor:
-        if selectedAFSC in afscDict:
-            # Prepare the data to be inserted
-            bases = afscDict[selectedAFSC]
-            for base in bases:
-                lat = baseDict[Latitude]
-                lon = baseDict[Longitude]
-                # Insert the data into the table
-                cursor.insertRow([selectedBase, lat, lon])
-        else:
-            print("Base not found.")
-    
-    return tableName
-    
+## Table creation function for multiple table types
 def tableMaker (baseTable, afscDict, tableName, geodatabase, tableType):
-    ##Prints the AFSCs that are at the selected base.
-    ##param baseDict: Dictionary with base names as keys and lists of AFSC codes as values.
-    ##param afscDict: Dictionary with AFSC codes as keys and their descriptions as values.
-    ##param selectedBase: The base selected by the user as a string.
-    # Check if the selected base is in the baseDict
+    
     arcpy.env.workspace = geodatabase
-    print(tableName)
+    ##creates specific name for AFSC table
+    if tableType == "AFSCTable" or tableType == "selectedBaseTable":
+        tablePath = tableName.strip('\"')  # Remove potential double quotes
+        tablePath = ''.join(char for char in tableName if char.isalnum() or char in ['_', '-'])
+    ##creates specific name for selected AFSC    
+    elif tableType == "selectedAFSCTable":
+        tablePath = tableName.strip('\"')  # Remove potential double quotes
+        tablePath = ''.join(char for char in tableName if char.isalnum())
+        tablePath = "AFSC_" + tablePath
 
-    if arcpy.Exists(tableName):
-        arcpy.Delete_management(tableName)
-        print(f"Existing table '{tableName}' was deleted.")
+    ##delete shapefile if exists    
+    if arcpy.Exists(tablePath):
+        arcpy.Delete_management(tablePath)
+        print(f"Existing table '{tablePath}' was deleted.")
     
     # Create the table
-    arcpy.CreateTable_management(geodatabase, tableName)
-    print(f"New table '{tableName}' created in the geodatabase.")
+    arcpy.CreateTable_management(geodatabase, tablePath)
+    print(f"New table '{tablePath}' created in the geodatabase.")
+    ##Creates a table for a selected base
     if tableType == "selectedBaseTable":
-        arcpy.AddField_management(tableName, "Base", "TEXT")
-        arcpy.AddField_management(tableName, "Latitude", "DOUBLE")
-        arcpy.AddField_management(tableName, "Longitude", "DOUBLE")
-        arcpy.AddField_management(tableName, "AFSC", "TEXT")
+        arcpy.AddField_management(tablePath, "Base", "TEXT")
+        arcpy.AddField_management(tablePath, "Latitude", "DOUBLE")
+        arcpy.AddField_management(tablePath, "Longitude", "DOUBLE")
+        arcpy.AddField_management(tablePath, "AFSC", "TEXT")
         searchFields =  ["Base", "Latitude", "Longitude", "AFSC"]
         insertFields = ["Base", "Latitude", "Longitude", "AFSC"]
         with arcpy.da.SearchCursor(baseTable, searchFields) as search_cursor, \
-             arcpy.da.InsertCursor(tableName, insertFields) as insert_cursor:
+             arcpy.da.InsertCursor(tablePath, insertFields) as insert_cursor:
             for baseName, lat, lon, afsc in search_cursor:
                 if baseName == tableName:
                     row = [baseName, lat, lon, afsc]  # Prepare row data
                     insert_cursor.insertRow(row)
-                    print(row)
-                    
-    elif tableType == "selectedAfscTable":
-        bases = afscDict[selectedAFSC]
-        arcpy.AddField_management(tableName, "Base", "TEXT")
-        arcpy.AddField_management(tableName, "Latitude", "DOUBLE")
-        arcpy.AddField_management(tableName, "Longitude", "DOUBLE")
+    
+    ##creates a table for a selceted AFSC 
+    elif tableType == "selectedAFSCTable":
+        bases = afscDict[tableName]
+        arcpy.AddField_management(tablePath, "Base", "TEXT")
+        arcpy.AddField_management(tablePath, "Latitude", "DOUBLE")
+        arcpy.AddField_management(tablePath, "Longitude", "DOUBLE")
+        searchFields =  ["Base", "Latitude", "Longitude"]
+        insertFields = ["Base", "Latitude", "Longitude"]
         with arcpy.da.SearchCursor(baseTable, searchFields) as search_cursor, \
-             arcpy.da.InsertCursor(tableName, insertFields) as insert_cursor:
-            for baseName, lat, lon, afsc in search_cursor:
+             arcpy.da.InsertCursor(tablePath, insertFields) as insert_cursor:
+            for baseName, lat, lon in search_cursor:
                 if baseName in bases:
-                    row = [baseName, lat, lon, afsc]  # Prepare row data
+                    row = [baseName, lat, lon]  # Prepare row data
                     insert_cursor.insertRow(row)
-                    print("base added to selected AFSC table")
-                    
+    ##Creates an AFSC only table                
     elif tableType == "AFSCTable":
         arcpy.AddField_management(tableName, "AFSC", "TEXT", field_length=100)
         fields = ["AFSC"]
@@ -469,55 +325,152 @@ def tableMaker (baseTable, afscDict, tableName, geodatabase, tableType):
             for afsc in afscDict.keys():
                 cursor.insertRow([afsc])
 
-    return tableName
+    return tablePath 
 
-def dataMan ():
-    folder = input('enter folder for geodatabase to be stored in: ')
-    csvPath = input('enter CSV path: ')
-    geodatabase = createGeodatabase(folder, "baseAndAFSC")
+##main data draw and creation function creates geodatabase, main table, cleans the imported table, builds dicts and does calculations
+def dataMan(folder,csvPath, geodatabaseName):
+    geodatabase = createGeodatabase(folder, geodatabaseName)
     baseTable = importCSVIntoGeodatabase(csvPath, geodatabase)
     cleanCSVinGeodatabase(baseTable)
     baseDict = buildBaseDict(baseTable, geodatabase)
-    print(baseDict)
     afscDict = buildAFSCDict(baseDict)
-    print(afscDict)
-    afscTable = AFSCTable(afscDict, geodatabase)
+    afscTable = tableMaker(baseTable, afscDict, "AFSCTable", geodatabase, "AFSCTable")
     standardDistance(afscDict, geodatabase, afscTable, baseTable)
     addAFSCCount(baseTable, geodatabase, "Base", countField='AFSCCount')
-    
-    ##shapeFile = createPointShapeFile(importedCSVPath, geodatabase)
-    ##createPropSymbolmap(geodatabase, shapeFile, "AFSCCount", 'outputMap')
     return geodatabase, baseTable, afscTable, afscDict, baseDict
 
-geodatabase, baseTable, afscTable, afscDict, baseDict = dataMan()
-##C:/Users/gjgaubatz/OneDrive - University of Iowa/Desktop/FinalProject
-##"C:/Users/gjgaubatz/OneDrive - University of Iowa/Desktop/Merged_AFSCs_with_Coordinates.csv"
-
+##function that creates an overall shapefile for all bases
 def overallMapping (geodatabase, baseTable, baseDict):
-    shapeFile = createPointShapeFile(baseTable, geodatabase, "OverallBaseLocations", "AFSCCount")
+    shapeFile = createPointShapeFile(baseTable, "baseInfo", geodatabase, "AFSCCount")
     print ("Overall Mapping Shapefile Created")
-    overallPropSymbol = createPropSymbolMap(geodatabase, shapeFile, "AFSCCount", 'OverallPropMap')
-    print ("Overall Symbol Mapping Shapefile Created")
-    return shapeFile, overallPropSymbol
-overallMapping(geodatabase, baseTable, baseDict)
+    return shapeFile
 
-def userBaseMapping (geodatabase, baseTable, afscTable, afscDict, baseDict):
+##Function that allows the user to enter a base that produces a point shapefile for the selected base
+def baseMapping (geodatabase, baseTable, afscTable, afscDict, baseDict, selectedBase):
+    ##call table maker function to create a table for individual base selected
+    selectedBaseTable = tableMaker(baseTable, afscDict, selectedBase, geodatabase, 'selectedBaseTable')
+    shapeFile = createPointShapeFile(selectedBaseTable,selectedBaseTable, geodatabase, "Base")
+    ##deletes intermediate table created for shapefile creation
+    if arcpy.Exists(selectedBaseTable):
+        arcpy.Delete_management(selectedBaseTable)
+        print(f"Existing table '{selectedBaseTable}' was deleted.")
+
+##Function that allows the user to select an AFSC that produces a point file representing all bases that AFSC is station at
+def AFSCMapping (geodatabase, baseTable, afscTable, afscDict, baseDict, selectedAFSC):
+    ##call table maker function to make an a tbale for the bases included in the afsc selected
+    selectedAFSCTable = tableMaker(baseTable, afscDict, selectedAFSC, geodatabase, 'selectedAFSCTable')
+    selectedAFSC = selectedAFSC.strip('\"')  # Remove potential double quotes
+    selectedAFSC = ''.join(char for char in selectedAFSC if char.isalnum())
+    ##Create shapefile
+    shapeFile = createPointShapeFile(selectedAFSCTable,selectedAFSCTable, geodatabase, "AFSC")
+    ##deletes intermediate table created for shapefile creation
+    if arcpy.Exists(selectedAFSCTable):
+        arcpy.Delete_management(selectedAFSCTable)
+        print(f"Existing table '{selectedAFSCTable}' was deleted.")
+
+def runForAllMapping():
+    ##User input for file folder for the storage of geodatabase and subsiquent files created by program
+    folder = input('enter folder for geodatabase to be stored in: ')
+    ##User input for file path for csv provided with program
+    csvPath = input('enter CSV path: ')
+    ##User name for geodatabase, can be an exisiting geodatabase or one created by the program and reused
+    geodatabaseName = input('enter geodatabase name: ')
+    ##call dataman fuction to get geoprocessing started
+    geodatabase, baseTable, afscTable, afscDict, baseDict = dataMan(folder,csvPath, geodatabaseName)
+    overallMapping (geodatabase, baseTable, baseDict)
+
+##Run Function for mapping a user entered Base from a list of Bases in data base
+def runForUserBaseMapping():
+    ##User input for file folder for the storage of geodatabase and subsiquent files created by program
+    folder = input('enter folder for geodatabase to be stored in: ')
+    ##User input for file path for csv provided with program
+    csvPath = input('enter CSV path: ')
+    ##User name for geodatabase, can be an exisiting geodatabase or one created by the program and reused
+    geodatabaseName = input('enter geodatabase name: ')
+    ##call dataman fuction to get geoprocessing started
+    geodatabase, baseTable, afscTable, afscDict, baseDict = dataMan(folder,csvPath, geodatabaseName)
+    baseNameList = []
+    ##Cursor to pull base names for listing to user
     with arcpy.da.SearchCursor(baseTable, ["Base"]) as search_cursor:
         for base in search_cursor:
             base = base[0]
             filteredBaseName = ''.join([char for char in base if char.isalpha() or char.isspace()])
+            baseNameList += [filteredBaseName]
             print(filteredBaseName)
-    selectedBase = input("enter one of the above bases of interest: ")
-    selectedBaseTable = tableMaker(baseTable, afscDict, selectedBase, geodatabase, 'selectedBaseTable')
-    shapeFile = createPointShapeFile(selectedBaseTable, geodatabase, selectedBase, None)
-userBaseMapping (geodatabase, baseTable, afscTable, afscDict, baseDict)
+    selectedBase = ""
+    ##User Input iteration that asks for input until stop statement is entered by user
+    while selectedBase != "STOP":
+        print ("To stop iteration enter: STOP")
+        selectedBase = input("enter one of the above bases of interest: ")
+        if selectedBase == "STOP":
+            print("User Base Mapping Stopped")
+            return
+        elif selectedBase in baseNameList:
+            baseMapping (geodatabase, baseTable, afscTable, afscDict, baseDict, selectedBase)
+        else: 
+            print("invalid entry")
+            print ("To stop iteration enter: STOP")
+            input("enter one of the above bases of interest: ")
 
-def userAFSCMapping (geodatabase, baseTable, afscTable, afscDict, baseDict):
-    AFSCList = []
-    with arcpy.da.SearchCursor(afscTable, ["AFSC"]) as search_cursor:
-        for AFSC in search_cursor:
-            AFSCList = AFSCList.append(AFSC)
-    print(AFSCList)
-    AFSC = input("enter one of the above AFSCs of interest: ")
-    selectedAFSCTable = tableMaker(baseTable, afscDict, selectedBase, geodatabase, 'selectedAFSCTable')
-    shapeFile = createPointShapeFile(selectedBaseTable, geodatabase, selectedBase, None)
+##Run Function for mapping a user entered AFSC from a list of AFSCs in data base
+def runForUserAFSCMapping():
+    ##User input for file folder for the storage of geodatabase and subsiquent files created by program
+    folder = input('enter folder for geodatabase to be stored in: ')
+    ##User input for file path for csv provided with program
+    csvPath = input('enter CSV path: ')
+    ##User name for geodatabase, can be an exisiting geodatabase or one created by the program and reused
+    geodatabaseName = input('enter geodatabase name: ')
+    ##call dataman fuction to get geoprocessing started
+    geodatabase, baseTable, afscTable, afscDict, baseDict = dataMan(folder,csvPath, geodatabaseName)
+    afscList = []
+    ## for loop to pulls afscs from afsc dist for lsiting to the user
+    for afsc in afscDict.keys():
+        afscList += [afsc]
+        print(afsc)
+    selectedAFSC = ""
+    ##User Input iteration that asks for input until stop statement is entered by user
+    while selectedAFSC != "STOP":
+        print ("To stop iteration enter: STOP")
+        selectedAFSC = input("enter one of the above AFSCs of interest: ")
+        if selectedAFSC == "STOP":
+            print("User AFSC Mapping Stopped")
+            return
+        elif selectedAFSC in afscList:
+            AFSCMapping (geodatabase, baseTable, afscTable, afscDict, baseDict, selectedAFSC)
+        else: 
+            print("invalid entry")
+            print ("To stop iteration enter: STOP")
+            input("enter one of the above AFSCs of interest: ")    
+
+##creates a sperate point file that includes the bases for every AFSC
+def allAFSCMapping (geodatabase, baseTable, afscTable, afscDict, baseDict):
+    for selectedAFSC in afscDict.keys():
+        selectedAFSCTable = tableMaker(baseTable, afscDict, selectedAFSC, geodatabase, 'selectedAFSCTable')
+        selectedAFSC = selectedAFSC.strip('\"')  # Remove potential double quotes
+        selectedAFSC = ''.join(char for char in selectedAFSC if char.isalnum())
+        shapeFile = createPointShapeFile(selectedAFSCTable,selectedAFSCTable, geodatabase, "AFSC")
+
+##Run Funtion to Produce an independent shapefile for every AFSC in original file
+def runForAllAFSCMapping():
+    ##User input for file folder for the storage of geodatabase and subsiquent files created by program
+    folder = input('enter folder for geodatabase to be stored in: ')
+    ##User input for file path for csv provided with program
+    csvPath = input('enter CSV path: ')
+    ##User name for geodatabase, can be an exisiting geodatabase or one created by the program and reused
+    geodatabaseName = input('enter geodatabase name: ')
+    ##call dataman fuction to get geoprocessing started
+    geodatabase, baseTable, afscTable, afscDict, baseDict = dataMan(folder,csvPath, geodatabaseName)
+    allAFSCMapping (geodatabase, baseTable, afscTable, afscDict, baseDict)
+
+##call to run the runForAllMapping function
+runForAllMapping()
+
+##call to run the runForUserBaseMapping function
+runForUserBaseMapping()
+
+##call to run the runForUserAFSCMapping function
+runForUserAFSCMapping ()
+
+##call to run the runForAllAFSCMapping function
+##Creates 40+ files do not run without good destination
+runForAllAFSCMapping()
