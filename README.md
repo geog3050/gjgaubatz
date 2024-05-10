@@ -9,4 +9,5 @@ This includes quiz material and assignments
 Importantly, there are several files that are integral in the final project for this class. 
 The finalCode.py is a python file for the final assignment
 Merged_AFSCs_with_Coordinates.csv is the information file that runs with that code to produce output for the final projects scope
+AFSC Bases FY2024 is the base data for a spatial link from AFSCs to bases for the final project
 Workflow is the description of how the final code itself works
