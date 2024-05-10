@@ -10,4 +10,3 @@ Importantly, there are several files that are integral in the final project for 
 The finalCode.py is a python file for the final assignment
 Merged_AFSCs_with_Coordinates.csv is the information file that runs with that code to produce output for the final projects scope
 Workflow is the description of how the final code itself works
-its purpose and information about yourself, your interests, background
